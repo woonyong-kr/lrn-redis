@@ -125,14 +125,14 @@ def test_noeviction_rejects_write_when_limit_is_exceeded():
 
 def test_allkeys_lru_evicts_the_oldest_key():
     probe_store = DataStore()
-    probe_expiry = ExpiryManager(probe_store)
+    ExpiryManager(probe_store)
     probe_store.set("a", make_string("a" * 20))
     time.sleep(0.001)
     probe_store.set("b", make_string("b" * 20))
     limit = probe_store.used_memory + 64
 
     store = DataStore(maxmemory_bytes=limit, eviction_policy="allkeys-lru")
-    expiry = ExpiryManager(store)
+    ExpiryManager(store)
 
     store.set("a", make_string("a" * 20))
     time.sleep(0.001)
@@ -169,3 +169,53 @@ def test_volatile_ttl_evicts_key_with_nearest_expiry():
     assert store.exists("soon") is False
     assert store.exists("later") is True
     assert store.exists("new") is True
+
+
+def test_default_mutations_do_not_copy_existing_values(monkeypatch):
+    store = DataStore()
+    ExpiryManager(store)
+    store.rpush("queue", "one", "two")
+
+    def fail_if_called(_value):
+        raise AssertionError("deepcopy must not run without a maxmemory limit")
+
+    monkeypatch.setattr("store.datastore.copy.deepcopy", fail_if_called)
+
+    store.rpush("queue", "three")
+    store.set("plain", make_string("value"))
+
+    assert store.lrange("queue", 0, -1) == ["one", "two", "three"]
+    assert store.get("plain").value == b"value"
+
+
+def test_single_key_mutation_updates_memory_without_full_recalculation(monkeypatch):
+    store = DataStore()
+    ExpiryManager(store)
+    store.set("one", make_string("a"))
+    store.set("two", make_string("b"))
+    before = store.used_memory
+
+    def fail_if_called():
+        raise AssertionError("single-key mutations must not scan the full keyspace")
+
+    monkeypatch.setattr(store, "recompute_memory_usage", fail_if_called)
+
+    store.set("one", make_string("a" * 100))
+    after_growth = store.used_memory
+    store.delete("two")
+
+    assert after_growth > before
+    assert 0 < store.used_memory < after_growth
+
+
+def test_incremental_and_full_memory_accounting_match():
+    store = DataStore()
+    expiry = ExpiryManager(store)
+    store.set("plain", make_string("value"))
+    store.rpush("queue", "one", "two")
+    expiry.set_expiry("plain", 60)
+    incremental = store.used_memory
+
+    store.recompute_memory_usage()
+
+    assert store.used_memory == incremental

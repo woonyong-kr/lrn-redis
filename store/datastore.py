@@ -10,16 +10,21 @@ import copy
 import fnmatch
 import random
 import time
-from collections import deque
-from typing import Optional, Any, List, Callable
+from typing import Callable, List, Optional
 
 from store.errors import MemoryLimitError
 from store.hash_table import Hash
 from store.memory import deep_getsizeof
 from store.redis_object import (
     RedisObject,
-    TYPE_STRING, TYPE_HASH, TYPE_LIST, TYPE_SET, TYPE_ZSET, TYPE_NONE,
-    make_list, make_set, make_zset, to_bytes,
+    TYPE_HASH,
+    TYPE_LIST,
+    TYPE_NONE,
+    TYPE_SET,
+    TYPE_ZSET,
+    make_list,
+    make_set,
+    make_zset,
 )
 from store.skiplist import ZSet
 
@@ -79,28 +84,35 @@ class DataStore:
         """영속화 로드 시 메모리 한도 검사 없이 키를 복원합니다."""
         self._data[key] = obj
         self._last_access[key] = time.monotonic()
-        self.recompute_memory_usage()
+        self._sync_memory_for_key(key)
 
     def recompute_memory_usage(self) -> None:
         self._key_sizes = {
             key: self._estimate_key_size(key, obj)
             for key, obj in self._data.items()
         }
-        self._used_memory = self._estimate_dataset_memory()
+        self._used_memory = sum(self._key_sizes.values())
 
     def enforce_memory_limit(self) -> None:
         self._enforce_maxmemory(None)
 
-    def _snapshot_key(self, key: str):
+    def _snapshot_key(self, key: str, *, copy_value: Optional[bool] = None):
         obj = self._data.get(key, _MISSING)
-        backup = copy.deepcopy(obj) if obj is not _MISSING else _MISSING
+        if copy_value is None:
+            copy_value = self.maxmemory_bytes > 0
+        backup = (
+            copy.deepcopy(obj)
+            if copy_value and obj is not _MISSING
+            else obj
+        )
         return backup, self._last_access.get(key)
 
     def _restore_key_snapshot(self, key: str, snapshot) -> None:
+        current_size = self._key_sizes.pop(key, 0)
+        self._used_memory = max(0, self._used_memory - current_size)
         obj, access_at = snapshot
         if obj is _MISSING:
             self._data.pop(key, None)
-            self._key_sizes.pop(key, None)
             self._last_access.pop(key, None)
         else:
             self._data[key] = obj
@@ -108,15 +120,22 @@ class DataStore:
                 self._last_access.pop(key, None)
             else:
                 self._last_access[key] = access_at
-        self.recompute_memory_usage()
+            self._sync_memory_for_key(key)
 
     def _touch_key(self, key: str) -> None:
         if key in self._data:
             self._last_access[key] = time.monotonic()
 
     def _sync_memory_for_key(self, key: str) -> None:
-        _ = key
-        self.recompute_memory_usage()
+        previous_size = self._key_sizes.get(key, 0)
+        if key not in self._data:
+            self._key_sizes.pop(key, None)
+            self._used_memory = max(0, self._used_memory - previous_size)
+            return
+
+        current_size = self._estimate_key_size(key, self._data[key])
+        self._key_sizes[key] = current_size
+        self._used_memory += current_size - previous_size
 
     def _finalize_mutation(self, key: str, snapshot) -> None:
         if key in self._data:
@@ -132,16 +151,6 @@ class DataStore:
     def _estimate_key_size(self, key: str, obj: RedisObject) -> int:
         expiry_at = None if self._expiry_manager is None else self._expiry_manager.get_expiry_at(key)
         return deep_getsizeof((key, obj, self._last_access.get(key), expiry_at))
-
-    def _estimate_dataset_memory(self) -> int:
-        expiry_state = {}
-        if self._expiry_manager is not None:
-            expiry_state = {
-                key: expiry_at
-                for key, expiry_at in self._expiry_manager._expiry.items()
-                if key in self._data
-            }
-        return deep_getsizeof((self._data, self._last_access, expiry_state))
 
     def _cleanup_expired_before_eviction(self) -> None:
         if self._expiry_manager is None:
@@ -226,7 +235,7 @@ class DataStore:
         키에 RedisObject를 저장합니다.
         기존 값이 있으면 덮어씁니다.
         """
-        snapshot = self._snapshot_key(key)
+        snapshot = self._snapshot_key(key, copy_value=False)
         self._data[key] = obj
         self._finalize_mutation(key, snapshot)
 
@@ -236,12 +245,12 @@ class DataStore:
         반환: 삭제된 키의 수 (1 또는 0)
         """
         if key in self._data:
+            removed_size = self._key_sizes.pop(key, 0)
             del self._data[key]
-            self._key_sizes.pop(key, 0)
             self._last_access.pop(key, None)
+            self._used_memory = max(0, self._used_memory - removed_size)
             for hook in self._delete_hooks:
                 hook(key)
-            self.recompute_memory_usage()
             self._record_auto_delete(key, reason)
             return 1
         return 0

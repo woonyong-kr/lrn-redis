@@ -34,9 +34,11 @@ class ExpiryManager:
 
     def set_expiry(self, key: str, seconds: float) -> None:
         self._expiry[key] = time.time() + seconds
+        self._store._sync_memory_for_key(key)
 
     def set_expiry_at(self, key: str, expiry_at: float) -> None:
         self._expiry[key] = expiry_at
+        self._store._sync_memory_for_key(key)
 
     def get_ttl(self, key: str) -> float:
         if not self._store.exists(key):
@@ -63,6 +65,7 @@ class ExpiryManager:
 
     def remove_expiry(self, key: str) -> None:
         self._expiry.pop(key, None)
+        self._store._sync_memory_for_key(key)
 
     def on_key_deleted(self, key: str) -> None:
         self._expiry.pop(key, None)
