@@ -40,9 +40,8 @@ endif
 COMPOSE         := docker compose
 PROJECT_COMPOSE := docker-compose.yml
 DEV_COMPOSE     := docker-compose.dev.yml
-REDIS_OFFICIAL_HOST_PORT ?= 6379
+REDIS_REFERENCE_HOST_PORT ?= 6379
 MINI_REDIS_HOST_PORT    ?= 6380
-MONGO_HOST_PORT         ?= 27017
 
 .PHONY: run bench down dev dev-down cli cli-official setup-venv install clean logs ps help
 .DEFAULT_GOAL  := help
@@ -51,13 +50,11 @@ MONGO_HOST_PORT         ?= 27017
 #  run ← 모든 것을 한 번에 실행하는 핵심 명령어
 #
 #  실행 순서:
-#    1. OS 출력
-#    2. Python venv 확인 / 없으면 생성 + 패키지 설치
-#    3. 실행 중인 컨테이너 전부 내리기
-#    4. results 디렉토리 준비
-#    5. 3개 서비스(Redis, mini-redis, MongoDB) + 벤치마크 봇 빌드 & 실행
+#    1. 이 프로젝트의 기존 컨테이너 종료
+#    2. results 디렉토리 준비
+#    3. 기준 Redis, mini-redis, 검증 봇 빌드 및 실행
 # ══════════════════════════════════════════════════════════════════════════════
-run: setup-venv down _results-dir
+run: down _results-dir
 	@echo ""
 	@echo "══════════════════════════════════════════"
 	@echo "  ▶  Docker 빌드 & 전체 서비스 실행"
@@ -65,8 +62,9 @@ run: setup-venv down _results-dir
 	$(COMPOSE) -f $(PROJECT_COMPOSE) up --build --abort-on-container-exit --exit-code-from benchmark
 	@echo ""
 	@echo "✔  벤치마크 완료 — 결과 확인:"
-	@echo "   benchmark/results/report.json"
-	@echo "   benchmark/results/report.csv"
+	@echo "   benchmark/results/compatibility.json"
+	@echo "   benchmark/results/performance.json"
+	@echo "   benchmark/results/performance.csv"
 
 # ── 벤치마크만 재실행 (이미 서비스가 올라와 있을 때) ────────────────────────
 bench:
@@ -78,36 +76,25 @@ bench:
 #
 #  .env 파일은 건드리지 않고 환경변수를 인라인으로 오버라이드
 #
-#  현재 quick_compare 설정 대비 조정 내용:
-#    BENCH_ITERATIONS      3000 → 500   (통계적으로 충분)
-#    BENCH_WARMUP           300 → 50
-#    BENCH_LEADERBOARD   5000 → 300   (ZSet 사전 삽입 병목 제거)
-#    BENCH_SESSION_COUNT    200 → 100
-#    BENCH_CACHE_HIT_KEYS  1000 → 100  (MongoDB 사전 삽입 대폭 감소)
-#    BENCH_STARTUP_DELAY      3 → 2
-#
-#  예상 소요 시간: 1-2분 (느린 Mac 에서도 5분 이내)
+#  53개 명령 차등 검증 후 500회 축소 성능 비교를 실행합니다.
 # ══════════════════════════════════════════════════════════════════════════════
-run-demo: setup-venv down _results-dir
+run-demo: down _results-dir
 	@echo ""
 	@echo "══════════════════════════════════════════"
 	@echo "  ▶  발표용 벤치마크 실행 (~1-2분 소요)"
 	@echo "══════════════════════════════════════════"
 	BENCH_ITERATIONS=500 \
+	BENCH_ROUNDS=3 \
 	BENCH_WARMUP=50 \
 	BENCH_PIPELINE_BATCH=50 \
 	BENCH_LEADERBOARD_PLAYERS=300 \
-	BENCH_SESSION_COUNT=100 \
-	BENCH_RATE_USER_COUNT=100 \
-	BENCH_QUEUE_COUNT=8 \
-	BENCH_CACHE_KEY_COUNT=200 \
-	BENCH_CACHE_HIT_KEYS=100 \
-	BENCH_STARTUP_DELAY_SECONDS=2 \
+	BENCH_KEY_COUNT=100 \
 	$(COMPOSE) -f $(PROJECT_COMPOSE) up --build --abort-on-container-exit --exit-code-from benchmark
 	@echo ""
 	@echo "✔  벤치마크 완료 — 결과 확인:"
-	@echo "   benchmark/results/report.json"
-	@echo "   benchmark/results/report.csv"
+	@echo "   benchmark/results/compatibility.json"
+	@echo "   benchmark/results/performance.json"
+	@echo "   benchmark/results/performance.csv"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  dev — mini-redis 단독 실행 (데모 / 발표 / 수동 테스트용)
@@ -151,21 +138,21 @@ cli:
 		(echo "  ✗ mini-redis-dev 가 실행되어 있지 않습니다. 먼저 'make dev' 를 실행하세요." && exit 1)
 	docker run --rm -it \
 		--network container:mini-redis-dev \
-		redis:6.2-alpine \
+		redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99 \
 		redis-cli -p 6379
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  cli-official — 벤치마크 환경의 공식 Redis 에 redis-cli 접속
 #
-#  전제 : make run (또는 docker compose up) 으로 redis-official 이 실행 중이어야 함
+#  전제 : make run (또는 docker compose up) 으로 redis-reference 가 실행 중이어야 함
 # ══════════════════════════════════════════════════════════════════════════════
 cli-official:
-	@echo "▶ 공식 Redis CLI 접속 중... (컨테이너: redis-official)"
-	@docker inspect redis-official > $(DEVNULL) 2>&1 || \
-		(echo "  ✗ redis-official 이 실행되어 있지 않습니다. 먼저 'make run' 을 실행하세요." && exit 1)
+	@echo "▶ 기준 Redis CLI 접속 중... (컨테이너: redis-reference)"
+	@docker inspect redis-reference > $(DEVNULL) 2>&1 || \
+		(echo "  ✗ redis-reference 가 실행되어 있지 않습니다. 먼저 'make run' 을 실행하세요." && exit 1)
 	docker run --rm -it \
-		--network container:redis-official \
-		redis:6.2-alpine \
+		--network container:redis-reference \
+		redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99 \
 		redis-cli -p 6379
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -185,42 +172,27 @@ setup-venv:
 	else \
 		echo "   ✔ venv 이미 존재 ($(VENV_PYTHON))"; \
 	fi
+	@if ! $(VENV_PYTHON) -m pip --version > $(DEVNULL) 2>&1; then \
+		echo "   pip 없음 → ensurepip 실행 중..."; \
+		$(VENV_PYTHON) -m ensurepip --upgrade; \
+	fi
 	@echo ""
 	@echo "── [3/4] 패키지 설치 (venv) ─────────────────"
-	$(VENV_PIP) install --quiet --upgrade pip
-	$(VENV_PIP) install --quiet -r requirements.txt
+	$(VENV_PYTHON) -m pip install --quiet --upgrade pip
+	$(VENV_PYTHON) -m pip install --quiet -r requirements.txt
 	@echo "   ✔ 패키지 설치 완료"
 
 # ── 패키지만 재설치 ──────────────────────────────────────────────────────────
 install: setup-venv
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  down — 실행 중인 컨테이너 전부 종료 + 포트 강제 해제
-#
-#  1단계: 현재 프로젝트 docker compose down
-#  2단계: 프로젝트 외 컨테이너 중 포트 6379/6380/27017 점유 중인 것도 강제 종료
-#  3단계: (Mac) 로컬 프로세스 중 해당 포트 사용 중인 것 kill
+#  down — 이 프로젝트가 만든 컨테이너만 종료
 # ══════════════════════════════════════════════════════════════════════════════
 down:
 	@echo ""
-	@echo "── [4/4] 기존 컨테이너 / 포트 정리 ──────────"
+	@echo "── 기존 프로젝트 컨테이너 정리 ──────────────"
 	@$(COMPOSE) -f $(PROJECT_COMPOSE) down --remove-orphans 2>$(DEVNULL) || true
-ifeq ($(DETECTED_OS),Windows)
-	@echo "   Docker 포트 점유 컨테이너 정리 (Windows)..."
-	@for /f %%i in ('docker ps -q --filter publish=$(REDIS_OFFICIAL_HOST_PORT)') do docker stop %%i 2>NUL || true
-	@for /f %%i in ('docker ps -q --filter publish=$(MINI_REDIS_HOST_PORT)') do docker stop %%i 2>NUL || true
-	@for /f %%i in ('docker ps -q --filter publish=$(MONGO_HOST_PORT)') do docker stop %%i 2>NUL || true
-else
-	@echo "   Docker 포트 점유 컨테이너 정리 (Mac/Linux)..."
-	@docker ps -q --filter publish=$(REDIS_OFFICIAL_HOST_PORT) | xargs -r docker stop 2>$(DEVNULL) || true
-	@docker ps -q --filter publish=$(MINI_REDIS_HOST_PORT)    | xargs -r docker stop 2>$(DEVNULL) || true
-	@docker ps -q --filter publish=$(MONGO_HOST_PORT)         | xargs -r docker stop 2>$(DEVNULL) || true
-	@echo "   로컬 프로세스 포트 정리..."
-	@lsof -ti:$(REDIS_OFFICIAL_HOST_PORT) | xargs -r kill -9 2>$(DEVNULL) || true
-	@lsof -ti:$(MINI_REDIS_HOST_PORT)    | xargs -r kill -9 2>$(DEVNULL) || true
-	@lsof -ti:$(MONGO_HOST_PORT)         | xargs -r kill -9 2>$(DEVNULL) || true
-endif
-	@echo "   ✔ 포트 정리 완료 ($(REDIS_OFFICIAL_HOST_PORT) / $(MINI_REDIS_HOST_PORT) / $(MONGO_HOST_PORT))"
+	@echo "   ✔ 프로젝트 컨테이너 정리 완료"
 
 # ── results 디렉토리 보장 ────────────────────────────────────────────────────
 _results-dir:
@@ -259,7 +231,7 @@ help:
 	@echo ""
 	@echo "  ── 벤치마크 환경 (docker-compose.yml) ─────────────"
 	@echo "  make run-demo     발표용 벤치마크 (~1-2분, 5분 이내 보장)"
-	@echo "  make run          풀 벤치마크 (quick_compare 프로필, ~5분+)"
+	@echo "  make run          53개 명령 검증 + 전체 성능 비교"
 	@echo "  make bench        서비스가 떠 있을 때 벤치마크 봇만 재실행"
 	@echo "  make cli-official 공식 Redis 에 redis-cli 접속"
 	@echo "  make down         벤치마크 컨테이너 전부 종료"

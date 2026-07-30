@@ -1,5 +1,3 @@
-import pytest
-
 from store.hash_table import Hash, OpenAddressHashTable, murmurhash3_32
 
 

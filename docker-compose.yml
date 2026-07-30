@@ -1,26 +1,22 @@
 services:
-
-  # ── 1. 실제 Redis (공식 이미지) ──────────────────────────────────
-  redis-official:
-    image: redis:7-alpine
-    container_name: redis-official
+  redis-reference:
+    image: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    container_name: redis-reference
     ports:
-      - "${REDIS_OFFICIAL_HOST_PORT:-6379}:6379"
-    # 데이터 볼륨 없음 → 컨테이너 종료 시 데이터 소멸
+      - "${REDIS_REFERENCE_HOST_PORT:-6379}:6379"
     command:
       - redis-server
       - --save
       - ""
       - --appendonly
-      - ${REDIS_APPENDONLY:-no}
+      - "no"
       - --maxmemory
-      - ${REDIS_MAXMEMORY:-0}
+      - "0"
       - --maxmemory-policy
-      - ${REDIS_MAXMEMORY_POLICY:-noeviction}
+      - noeviction
     networks:
       - bench-net
 
-  # ── 2. 직접 만든 mini-redis ───────────────────────────────────────
   mini-redis:
     build:
       context: .
@@ -36,76 +32,49 @@ services:
       MINI_REDIS_EXPIRY_LOOP_INTERVAL_MS: ${MINI_REDIS_EXPIRY_LOOP_INTERVAL_MS:-100}
       MINI_REDIS_EXPIRY_SAMPLE_SIZE: ${MINI_REDIS_EXPIRY_SAMPLE_SIZE:-20}
       MINI_REDIS_EXPIRY_MAX_PASSES: ${MINI_REDIS_EXPIRY_MAX_PASSES:-4}
-      MINI_REDIS_MAXMEMORY: ${MINI_REDIS_MAXMEMORY:-0}
-      MINI_REDIS_MAXMEMORY_POLICY: ${MINI_REDIS_MAXMEMORY_POLICY:-noeviction}
-      MINI_REDIS_APPENDONLY: ${MINI_REDIS_APPENDONLY:-no}
-      MINI_REDIS_AOF_FILE: ${MINI_REDIS_AOF_FILE:-data/appendonly.aof}
-      MINI_REDIS_AOF_FSYNC: ${MINI_REDIS_AOF_FSYNC:-everysec}
-      MINI_REDIS_RDB_ENABLED: ${MINI_REDIS_RDB_ENABLED:-no}
-      MINI_REDIS_RDB_FILE: ${MINI_REDIS_RDB_FILE:-data/dump.rdb}
-      MINI_REDIS_RDB_SAVE_INTERVAL_SECONDS: ${MINI_REDIS_RDB_SAVE_INTERVAL_SECONDS:-0}
+      MINI_REDIS_MAXMEMORY: "0"
+      MINI_REDIS_MAXMEMORY_POLICY: noeviction
+      MINI_REDIS_APPENDONLY: "no"
+      MINI_REDIS_RDB_ENABLED: "no"
+      MINI_REDIS_RDB_SAVE_INTERVAL_SECONDS: "0"
       MINI_REDIS_CLIENT_IDLE_TIMEOUT_SECONDS: ${MINI_REDIS_CLIENT_IDLE_TIMEOUT_SECONDS:-30}
       MINI_REDIS_WRITE_DRAIN_TIMEOUT_SECONDS: ${MINI_REDIS_WRITE_DRAIN_TIMEOUT_SECONDS:-5}
       MINI_REDIS_MAX_INPUT_BUFFER_BYTES: ${MINI_REDIS_MAX_INPUT_BUFFER_BYTES:-1048576}
       MINI_REDIS_MAX_OUTPUT_BUFFER_BYTES: ${MINI_REDIS_MAX_OUTPUT_BUFFER_BYTES:-262144}
       MINI_REDIS_MAX_COMMANDS_PER_TICK: ${MINI_REDIS_MAX_COMMANDS_PER_TICK:-128}
       MINI_REDIS_LOG_LEVEL: ${MINI_REDIS_LOG_LEVEL:-INFO}
-    volumes:
-      - ./data:/app/data
     networks:
       - bench-net
 
-  # ── 3. MongoDB (비교용 - 영속성 DB) ──────────────────────────────
-  mongodb:
-    image: mongo:7
-    container_name: mongodb
-    ports:
-      - "${MONGO_HOST_PORT:-27017}:27017"
-    # 볼륨 없음 → 종료 시 데이터 소멸
-    environment:
-      MONGO_INITDB_DATABASE: bench
-    networks:
-      - bench-net
-
-  # ── 4. 벤치마크 봇 (테스트 실행기) ──────────────────────────────
   benchmark:
     build:
       context: ./benchmark
       dockerfile: Dockerfile
     container_name: benchmark
     depends_on:
-      - redis-official
+      - redis-reference
       - mini-redis
-      - mongodb
     environment:
       PYTHONUNBUFFERED: "1"
-      REDIS_OFFICIAL_HOST: ${BENCH_REDIS_OFFICIAL_HOST:-redis-official}
-      REDIS_OFFICIAL_PORT: ${BENCH_REDIS_OFFICIAL_PORT:-6379}
+      REDIS_REFERENCE_HOST: ${BENCH_REDIS_REFERENCE_HOST:-redis-reference}
+      REDIS_REFERENCE_PORT: ${BENCH_REDIS_REFERENCE_PORT:-6379}
+      REDIS_REFERENCE_IMAGE: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
       MINI_REDIS_HOST: ${BENCH_MINI_REDIS_HOST:-mini-redis}
       MINI_REDIS_PORT: ${BENCH_MINI_REDIS_PORT:-6379}
-      MONGO_HOST: ${BENCH_MONGO_HOST:-mongodb}
-      MONGO_PORT: ${BENCH_MONGO_PORT:-27017}
+      BENCH_ROUNDS: ${BENCH_ROUNDS:-5}
       BENCH_ITERATIONS: ${BENCH_ITERATIONS:-1000}
       BENCH_WARMUP: ${BENCH_WARMUP:-100}
       BENCH_PIPELINE_BATCH: ${BENCH_PIPELINE_BATCH:-100}
-      BENCH_TTL_SECONDS: ${BENCH_TTL_SECONDS:-60}
-      BENCH_VALUE_SIZE: ${BENCH_VALUE_SIZE:-32}
-      BENCH_CACHE_KEY_COUNT: ${BENCH_CACHE_KEY_COUNT:-100}
-      BENCH_SESSION_COUNT: ${BENCH_SESSION_COUNT:-100}
-      BENCH_RATE_USER_COUNT: ${BENCH_RATE_USER_COUNT:-50}
-      BENCH_QUEUE_COUNT: ${BENCH_QUEUE_COUNT:-5}
+      BENCH_VALUE_SIZE: ${BENCH_VALUE_SIZE:-64}
+      BENCH_KEY_COUNT: ${BENCH_KEY_COUNT:-200}
       BENCH_LEADERBOARD_PLAYERS: ${BENCH_LEADERBOARD_PLAYERS:-500}
-      BENCH_CACHE_HIT_KEYS: ${BENCH_CACHE_HIT_KEYS:-100}
-      BENCH_STARTUP_DELAY_SECONDS: ${BENCH_STARTUP_DELAY_SECONDS:-3}
       BENCH_SOCKET_TIMEOUT_SECONDS: ${BENCH_SOCKET_TIMEOUT_SECONDS:-5}
-      BENCH_RANDOM_SEED: ${BENCH_RANDOM_SEED:-}
     volumes:
-      - ./benchmark/results:/app/results   # 결과 JSON/CSV 파일 저장
+      - ./benchmark/results:/app/results
     networks:
       - bench-net
-    # 서비스들이 준비될 때까지 잠깐 대기 후 실행
     command: >
-      sh -c "sleep ${BENCH_STARTUP_DELAY_SECONDS:-3} && python -u benchmark.py"
+      sh -c "python -u compatibility.py && python -u benchmark.py"
 
 networks:
   bench-net:

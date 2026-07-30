@@ -5,7 +5,6 @@
   pytest tests/test_protocol.py -v
 """
 
-import pytest
 from protocol.parser import parse
 from protocol.encoder import (
     encode_simple_string, encode_error, encode_integer,
