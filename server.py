@@ -14,8 +14,12 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 
-import uvloop
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 from commands.dispatcher import dispatch
 from protocol.encoder import RespError, encode
@@ -25,7 +29,8 @@ from store.expiry import ExpiryManager
 from store.persistence import PersistenceManager
 
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+if uvloop is not None:
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 class ClientLimitError(Exception):
@@ -77,7 +82,7 @@ def _env_memory(name: str, default: int = 0) -> int:
     }
     for suffix, multiplier in suffixes.items():
         if value.endswith(suffix):
-            return int(float(value[:-len(suffix)]) * multiplier)
+            return int(float(value[: -len(suffix)]) * multiplier)
     return int(value)
 
 
@@ -97,12 +102,24 @@ DEFAULT_AOF_FILE = os.getenv("MINI_REDIS_AOF_FILE", "data/appendonly.aof")
 DEFAULT_AOF_FSYNC = os.getenv("MINI_REDIS_AOF_FSYNC", "everysec")
 DEFAULT_RDB_ENABLED = _env_bool("MINI_REDIS_RDB_ENABLED", False)
 DEFAULT_RDB_FILE = os.getenv("MINI_REDIS_RDB_FILE", "data/dump.rdb")
-DEFAULT_RDB_SAVE_INTERVAL = _env_float("MINI_REDIS_RDB_SAVE_INTERVAL_SECONDS", 0.0, min_value=0.0)
-DEFAULT_CLIENT_IDLE_TIMEOUT = _env_float("MINI_REDIS_CLIENT_IDLE_TIMEOUT_SECONDS", 30.0, min_value=0.1)
-DEFAULT_WRITE_DRAIN_TIMEOUT = _env_float("MINI_REDIS_WRITE_DRAIN_TIMEOUT_SECONDS", 5.0, min_value=0.1)
-DEFAULT_MAX_INPUT_BUFFER = _env_int("MINI_REDIS_MAX_INPUT_BUFFER_BYTES", 1024 * 1024, min_value=1024)
-DEFAULT_MAX_OUTPUT_BUFFER = _env_int("MINI_REDIS_MAX_OUTPUT_BUFFER_BYTES", 256 * 1024, min_value=1024)
-DEFAULT_MAX_COMMANDS_PER_TICK = _env_int("MINI_REDIS_MAX_COMMANDS_PER_TICK", 128, min_value=1)
+DEFAULT_RDB_SAVE_INTERVAL = _env_float(
+    "MINI_REDIS_RDB_SAVE_INTERVAL_SECONDS", 0.0, min_value=0.0
+)
+DEFAULT_CLIENT_IDLE_TIMEOUT = _env_float(
+    "MINI_REDIS_CLIENT_IDLE_TIMEOUT_SECONDS", 30.0, min_value=0.1
+)
+DEFAULT_WRITE_DRAIN_TIMEOUT = _env_float(
+    "MINI_REDIS_WRITE_DRAIN_TIMEOUT_SECONDS", 5.0, min_value=0.1
+)
+DEFAULT_MAX_INPUT_BUFFER = _env_int(
+    "MINI_REDIS_MAX_INPUT_BUFFER_BYTES", 1024 * 1024, min_value=1024
+)
+DEFAULT_MAX_OUTPUT_BUFFER = _env_int(
+    "MINI_REDIS_MAX_OUTPUT_BUFFER_BYTES", 256 * 1024, min_value=1024
+)
+DEFAULT_MAX_COMMANDS_PER_TICK = _env_int(
+    "MINI_REDIS_MAX_COMMANDS_PER_TICK", 128, min_value=1
+)
 
 logging.basicConfig(
     level=getattr(logging, DEFAULT_LOG_LEVEL, logging.INFO),
@@ -200,7 +217,9 @@ class Server:
         if self._write_buffer_size(writer) > self.max_output_buffer_bytes:
             raise ClientLimitError("output buffer limit exceeded")
 
-    async def _send_protocol_error(self, writer: asyncio.StreamWriter, message: str) -> None:
+    async def _send_protocol_error(
+        self, writer: asyncio.StreamWriter, message: str
+    ) -> None:
         writer.write(encode(RespError(message)))
         try:
             await self._drain(writer)
@@ -225,7 +244,9 @@ class Server:
 
                 buffer += chunk
                 if len(buffer) > self.max_input_buffer_bytes:
-                    await self._send_protocol_error(writer, "ERR request buffer limit exceeded")
+                    await self._send_protocol_error(
+                        writer, "ERR request buffer limit exceeded"
+                    )
                     break
 
                 while buffer:
@@ -265,18 +286,36 @@ class Server:
             except Exception:
                 pass
 
+    async def maintenance_loop(self, interval: float = 0.1) -> None:
+        while True:
+            self.persistence.maintenance()
+            await asyncio.sleep(interval)
+
     async def start(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-        asyncio.create_task(self.expiry.active_expiry_loop())
         server = await asyncio.start_server(self.handle_client, host, port)
 
         logger.info("mini-redis server started on %s:%s", host, port)
 
+        workers = []
         try:
             async with server:
-                await server.serve_forever()
+                workers = [
+                    asyncio.create_task(coro)
+                    for coro in (
+                        self.expiry.active_expiry_loop(),
+                        self.maintenance_loop(),
+                        server.serve_forever(),
+                    )
+                ]
+                await asyncio.gather(*workers)
         finally:
-            self.persistence.save_rdb()
-            self.persistence.close()
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            try:
+                self.persistence.save_rdb()
+            finally:
+                self.persistence.close()
 
 
 if __name__ == "__main__":
@@ -285,5 +324,16 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port")
     args = parser.parse_args()
 
-    server = Server()
-    asyncio.run(server.start(host=args.host, port=args.port))
+    async def main():
+        task = asyncio.current_task()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                asyncio.get_running_loop().add_signal_handler(sig, task.cancel)
+            except NotImplementedError:
+                pass
+        await Server().start(host=args.host, port=args.port)
+
+    try:
+        asyncio.run(main())
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass

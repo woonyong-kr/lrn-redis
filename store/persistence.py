@@ -50,6 +50,8 @@ class PersistenceManager:
         rdb_path: str = "data/dump.rdb",
         rdb_save_interval_seconds: float = 0.0,
     ):
+        if aof_fsync not in ("always", "everysec", "no"):
+            raise ValueError("aof_fsync must be always, everysec, or no")
         self.store = store
         self.expiry = expiry
         self.aof_enabled = aof_enabled
@@ -62,6 +64,7 @@ class PersistenceManager:
         self._last_fsync_at = 0.0
         self._last_rdb_save_at = 0.0
         self._aof_handle = None
+        self._saving_snapshot = False
 
         self.store.bind_persistence_manager(self)
 
@@ -70,7 +73,11 @@ class PersistenceManager:
             self._aof_handle = open(self.aof_path, "ab+", buffering=0)
             self._aof_handle.seek(0, os.SEEK_END)
 
-        self.load()
+        try:
+            self.load()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._aof_handle is not None:
@@ -93,11 +100,19 @@ class PersistenceManager:
         return _Suspend()
 
     def load(self) -> None:
-        if self.aof_enabled and os.path.exists(self.aof_path) and os.path.getsize(self.aof_path) > 0:
+        if (
+            self.aof_enabled
+            and os.path.exists(self.aof_path)
+            and os.path.getsize(self.aof_path) > 0
+        ):
             self.replay_aof()
             return
 
-        if self.rdb_enabled and os.path.exists(self.rdb_path) and os.path.getsize(self.rdb_path) > 0:
+        if (
+            self.rdb_enabled
+            and os.path.exists(self.rdb_path)
+            and os.path.getsize(self.rdb_path) > 0
+        ):
             self.load_rdb()
 
     def replay_aof(self) -> None:
@@ -120,16 +135,22 @@ class PersistenceManager:
         self._last_rdb_save_at = time.time()
 
     def save_rdb(self) -> None:
-        if not self.rdb_enabled:
+        if not self.rdb_enabled or self._saving_snapshot:
             return
 
         self._ensure_parent_dir(self.rdb_path)
         temp_path = self.rdb_path + ".tmp"
-        with open(temp_path, "wb") as handle:
-            handle.write(RDB_MAGIC)
-            for command in self._snapshot_commands():
-                handle.write(encode_array(command))
-        os.replace(temp_path, self.rdb_path)
+        self._saving_snapshot = True
+        try:
+            with open(temp_path, "wb") as handle:
+                handle.write(RDB_MAGIC)
+                for command in self._snapshot_commands():
+                    handle.write(encode_array(command))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.rdb_path)
+        finally:
+            self._saving_snapshot = False
         self._last_rdb_save_at = time.time()
 
     def maybe_save_rdb(self) -> None:
@@ -138,6 +159,17 @@ class PersistenceManager:
         if time.time() - self._last_rdb_save_at < self.rdb_save_interval_seconds:
             return
         self.save_rdb()
+
+    def maintenance(self) -> None:
+        """Flush everysec even when clients stop writing; service snapshots too."""
+        if (
+            self._aof_handle is not None
+            and self.aof_fsync == "everysec"
+            and time.time() - self._last_fsync_at >= 1.0
+        ):
+            os.fsync(self._aof_handle.fileno())
+            self._last_fsync_at = time.time()
+        self.maybe_save_rdb()
 
     def record_delete(self, key: str) -> None:
         if self._disabled:
@@ -175,6 +207,16 @@ class PersistenceManager:
                 self._last_fsync_at = now
 
     def _replay_stream(self, handle) -> None:
+        # Evictions are already part of the log. Replaying under the live memory
+        # policy would run random eviction a second time on intermediate states.
+        limit = self.store.maxmemory_bytes
+        self.store.maxmemory_bytes = 0
+        try:
+            self._read_stream(handle)
+        finally:
+            self.store.maxmemory_bytes = limit
+
+    def _read_stream(self, handle) -> None:
         from commands.dispatcher import dispatch
 
         buffer = b""
@@ -211,7 +253,11 @@ class PersistenceManager:
             return
 
         if obj.type == TYPE_HASH:
-            entries = obj.value.items() if isinstance(obj.value, Hash) else list(obj.value.items())
+            entries = (
+                obj.value.items()
+                if isinstance(obj.value, Hash)
+                else list(obj.value.items())
+            )
             if entries:
                 command = ["HSET", key]
                 for field, value in entries:
@@ -251,6 +297,8 @@ class PersistenceManager:
 
         if cmd_name == "SET":
             key = args[0]
+            if not self.store.exists(key):
+                return [["DEL", key]]
             value = args[1]
             commands = [["SET", key, value]]
             expiry_at = self.expiry.get_expiry_at(key)
@@ -270,8 +318,18 @@ class PersistenceManager:
         if cmd_name == "PERSIST":
             return [command] if result == 1 else []
 
+        if cmd_name == "MSET":
+            # A later pair can evict an earlier pair; persist final surviving
+            # values rather than resurrecting every original argument on replay.
+            commands = []
+            for key in dict.fromkeys(args[::2]):
+                obj = self.store.get(key)
+                commands.append(
+                    ["DEL", key] if obj is None else ["SET", key, _to_text(obj.value)]
+                )
+            return commands
+
         if cmd_name in {
-            "MSET",
             "INCR",
             "DECR",
             "INCRBY",
@@ -290,6 +348,8 @@ class PersistenceManager:
             "ZADD",
             "ZREM",
         }:
+            if cmd_name != "DEL" and not self.store.exists(args[0]):
+                return [["DEL", args[0]]]
             return [[cmd_name, *args]]
 
         return []

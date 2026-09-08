@@ -245,3 +245,22 @@ help:
 	@echo ""
 	@echo "  감지된 OS : $(DETECTED_OS)"
 	@echo ""
+
+# Standalone learning entrypoints; do not start/stop shared Docker services.
+.PHONY: setup demo test serve
+setup:
+	uv venv --python 3.12 .venv --allow-existing
+	uv pip sync --python .venv/bin/python requirements.lock
+
+demo:
+	.venv/bin/python scripts/demo.py
+
+test:
+	.venv/bin/python -m pytest -q
+
+serve:
+	.venv/bin/python server.py --port 6380
+
+.PHONY: compare
+compare:
+	.venv/bin/python scripts/compare.py

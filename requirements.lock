@@ -1,0 +1,10 @@
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+pygments==2.21.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+redis==8.1.0
+sortedcontainers==2.4.0
+typing-extensions==4.16.0
+uvloop==0.22.1
