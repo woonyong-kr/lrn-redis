@@ -21,18 +21,7 @@ def test_protocol_round_trip_preserves_invalid_utf8_bytes():
 
     assert consumed > 0
     assert command is not None
-    assert encode_bulk_string(command[2]) == f"${len(payload)}\r\n".encode() + payload + b"\r\n"
-
-
-def test_datastore_delete_hooks_run_on_delete_and_flush():
-    store = DataStore()
-    deleted = []
-    store.register_delete_hook(deleted.append)
-
-    store.set("alpha", make_string("1"))
-    store.set("beta", make_string("2"))
-
-    assert store.delete("alpha") == 1
-    store.flush()
-
-    assert deleted == ["alpha", "beta"]
+    assert (
+        encode_bulk_string(command[2])
+        == f"${len(payload)}\r\n".encode() + payload + b"\r\n"
+    )

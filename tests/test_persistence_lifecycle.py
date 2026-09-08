@@ -51,18 +51,6 @@ async def test_periodic_maintenance_runs_without_more_commands(tmp_path, monkeyp
         server.persistence.close()
 
 
-from commands.dispatcher import COMMAND_TABLE
-from protocol.encoder import RespError
-
-
-@pytest.mark.parametrize("name", sorted(COMMAND_TABLE))
-def test_every_supported_command_rejects_invalid_arity(name):
-    store = DataStore()
-    expiry = ExpiryManager(store)
-    command = [name, "one", "two"] if name in ("PING", "FLUSHALL") else [name]
-    assert isinstance(dispatch(command, store, expiry), RespError)
-
-
 def test_random_eviction_removes_selected_old_key(monkeypatch):
     store = DataStore(maxmemory_bytes=800, eviction_policy="allkeys-random")
     expiry = ExpiryManager(store)

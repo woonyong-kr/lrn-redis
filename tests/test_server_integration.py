@@ -17,81 +17,27 @@ def encode_command(*parts: Union[str, bytes]) -> bytes:
 
 
 class RespStream:
-    def __init__(self, reader: asyncio.StreamReader):
+    def __init__(self, reader):
         self.reader = reader
-        self.buffer = b""
 
     async def read(self):
-        while True:
-            parsed = self._parse_one()
-            if parsed is not None:
-                return parsed
-
-            chunk = await self.reader.read(4096)
-            if not chunk:
-                raise EOFError("connection closed before full RESP reply")
-            self.buffer += chunk
-
-    def _parse_one(self):
-        if not self.buffer:
-            return None
-
-        parsed = self._parse_at(0)
-        if parsed is None:
-            return None
-
-        value, consumed = parsed
-        self.buffer = self.buffer[consumed:]
-        return value
-
-    def _parse_at(self, pos: int):
-        if pos >= len(self.buffer):
-            return None
-
-        prefix = self.buffer[pos:pos + 1]
-        line_end = self.buffer.find(b"\r\n", pos)
-        if prefix in (b"+", b"-", b":"):
-            if line_end == -1:
-                return None
-
-            payload = self.buffer[pos + 1:line_end]
-            consumed = line_end + 2
-            if prefix == b"+":
-                return payload.decode("utf-8"), consumed
-            if prefix == b"-":
-                return RuntimeError(payload.decode("utf-8")), consumed
-            return int(payload), consumed
-
+        line = await self.reader.readuntil(b"\r\n")
+        prefix, value = line[:1], line[1:-2]
+        if prefix == b"+":
+            return value.decode()
+        if prefix == b"-":
+            return RuntimeError(value.decode())
+        if prefix == b":":
+            return int(value)
         if prefix == b"$":
-            if line_end == -1:
-                return None
-
-            length = int(self.buffer[pos + 1:line_end])
-            if length == -1:
-                return None, line_end + 2
-
-            start = line_end + 2
-            end = start + length
-            if end + 2 > len(self.buffer):
-                return None
-            return self.buffer[start:end], end + 2
-
+            return (
+                None
+                if int(value) == -1
+                else (await self.reader.readexactly(int(value) + 2))[:-2]
+            )
         if prefix == b"*":
-            if line_end == -1:
-                return None
-
-            count = int(self.buffer[pos + 1:line_end])
-            current = line_end + 2
-            items = []
-            for _ in range(count):
-                parsed = self._parse_at(current)
-                if parsed is None:
-                    return None
-                value, current = parsed
-                items.append(value)
-            return items, current
-
-        raise AssertionError(f"unsupported RESP prefix: {prefix!r}")
+            return [await self.read() for _ in range(int(value))]
+        raise AssertionError(f"Unexpected RESP prefix: {prefix!r}")
 
 
 @asynccontextmanager
@@ -143,7 +89,10 @@ async def test_concurrent_incr_across_multiple_clients():
         try:
             writer.write(encode_command("GET", "counter"))
             await writer.drain()
-            assert await stream.read() == str(client_count * increments_per_client).encode()
+            assert (
+                await stream.read()
+                == str(client_count * increments_per_client).encode()
+            )
         finally:
             writer.close()
             await writer.wait_closed()
@@ -155,7 +104,9 @@ async def test_large_pipeline_preserves_response_order():
         stream, writer = await open_client(host, port)
         try:
             pipeline_size = 250
-            writer.write(b"".join(encode_command("INCR", "pipe") for _ in range(pipeline_size)))
+            writer.write(
+                b"".join(encode_command("INCR", "pipe") for _ in range(pipeline_size))
+            )
             await writer.drain()
 
             responses = [await stream.read() for _ in range(pipeline_size)]
