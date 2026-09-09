@@ -50,6 +50,6 @@ snapshot의 매직 바이트는 `MINIRDB1\r\n`이며 Redis RDB와 호환되지 �
 
 ## 출처와 기여
 
-[woonyong-kr/mini-redis](https://github.com/woonyong-kr/mini-redis)에서 이어 받은 학습용 파생본이다. 기준 원본 revision은 `05f382d42a3c8ac298de9f8f4dd763c6e97650d4`이다. 원본 과제·팀 코드와 이후 개인 확장을 구분하며, 개별 기여는 Git author와 diff로 확인한다. 기존 저작권 표시는 소스에 유지한다.
+원본 `woonyong-kr/mini-redis`의 `05f382d42a3c8ac298de9f8f4dd763c6e97650d4`에서 이어 받은 학습용 파생본이다. 원본 과제·팀 코드와 이후 개인 확장은 Git author와 diff로 구분하며, 기존 저작권 표시는 소스에 유지한다. 원본 주소의 공개 접근이 제한돼 있어 자료는 아래 이력 링크로 확인할 수 있다.
 
 이 파생본에서는 독립 실행 경로와 함께 느린 연결, 저장 실패, 퇴출 이후 복구를 다루는 코드를 보완했다. 이전 설계 문서와 실험은 [정리 전 이력](https://github.com/woonyong-kr/lrn-redis/tree/4ade14e1ec3ec2072d1ae9b7940946652bfb905e)에 남아 있다.
