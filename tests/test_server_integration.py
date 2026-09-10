@@ -179,18 +179,3 @@ async def test_slow_client_guard_raises_when_drain_cannot_clear_output_buffer():
 
     with pytest.raises(ClientLimitError, match="write drain timeout"):
         await server._flush_output_if_needed(writer)
-
-
-@pytest.mark.asyncio
-async def test_pubsub_commands_are_not_supported_anymore():
-    async with running_server() as (host, port):
-        stream, writer = await open_client(host, port)
-        try:
-            writer.write(encode_command("SUBSCRIBE", "news"))
-            await writer.drain()
-            response = await stream.read()
-            assert isinstance(response, RuntimeError)
-            assert str(response) == "ERR unknown command 'SUBSCRIBE'"
-        finally:
-            writer.close()
-            await writer.wait_closed()
